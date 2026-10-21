@@ -1,0 +1,380 @@
+// GoBarber.ch – schéma. SQLite en local (enums = String validées côté domaine) ;
+// passer à PostgreSQL en production (voir docs/DEPLOIEMENT.md). Montants en centimes de CHF.
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String   @id @default(cuid())
+  email           String   @unique
+  passwordHash    String
+  role            String   @default("CLIENT") // CLIENT | PARTNER | ADMIN | SUPPORT
+  firstName       String
+  lastName        String
+  phone           String?
+  emailVerifiedAt DateTime?
+  totpSecret      String?
+  totpEnabled     Boolean  @default(false)
+  failedLogins    Int      @default(0)
+  lockedUntil     DateTime?
+  active          Boolean  @default(true)
+  marketingOptIn  Boolean  @default(false)
+  locale          String   @default("fr")
+  lastLoginAt     DateTime?
+  deletedAt       DateTime?
+  canEditCalendar Boolean  @default(false) // personnel : droit d'ajouter / déplacer / annuler des rendez-vous (toujours vrai pour ADMIN)
+  createdAt       DateTime @default(now())
+  addresses       Address[]
+  partner         Partner?
+  bookings        Booking[] @relation("ClientBookings")
+  tokens          AuthToken[]
+  messages        Message[]
+  notifications   Notification[]
+  sessions        Session[]
+  devices         Device[]
+}
+
+model AuthToken {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // VERIFY_EMAIL | RESET_PASSWORD
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Address {
+  id        String  @id @default(cuid())
+  userId    String
+  label     String  @default("Domicile")
+  street    String
+  zip       String
+  city      String
+  access    String? // étage, digicode… (visible uniquement du barbier du rendez-vous)
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Partner {
+  id               String  @id @default(cuid())
+  userId           String  @unique
+  displayName      String
+  bio              String  @default("")
+  photoUrl         String?
+  status           String  @default("DRAFT") // DRAFT | PENDING | APPROVED | SUSPENDED | REJECTED
+  statusNote       String?
+  instantEnabled   Boolean @default(false)
+  baseZip          String  @default("")
+  baseCity         String  @default("")
+  legalForm        String? // [À RENSEIGNER] indépendant / raison individuelle / Sàrl…
+  ideNumber        String? // numéro IDE (CHE-xxx.xxx.xxx)
+  vatNumber        String?
+  payoutAccountRef String? // identifiant Stripe Connect (jamais d'IBAN en clair chez nous)
+  contractAcceptedAt DateTime?
+  contractVersion  String?
+  travelBufferMin  Int     @default(20)
+  responseWindowMin Int    @default(15)
+  ratingAvg        Float   @default(0)
+  ratingCount      Int     @default(0)
+  onlinePaymentEnabled Boolean @default(false) // choisi par l'administrateur : paiement en ligne possible pour CE barbier (sinon : paiement sur place)
+  stripeStatus     String? // statut d'onboarding du compte Stripe Connect (pending | complete)
+  canManageCalendar Boolean @default(false) // l'admin autorise ce barbier à gérer lui-même son calendrier
+  lockVersion      Int     @default(0) // incrémenté dans chaque transaction de réservation → sérialise les créneaux
+  createdAt        DateTime @default(now())
+  user             User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  zones            PartnerZone[]
+  services         PartnerService[]
+  availability     AvailabilityRule[]
+  timeOff          TimeOff[]
+  bookings         Booking[]
+  payouts          Payout[]
+  documents        PartnerDocument[]
+}
+
+model PartnerDocument {
+  id        String  @id @default(cuid())
+  partnerId String
+  kind      String  // ID | PERMIT | BUSINESS_PROOF | INSURANCE | OTHER
+  fileRef   String  // référence de stockage (objet privé), pas d'URL publique
+  status    String  @default("PENDING") // PENDING | OK | REJECTED
+  createdAt DateTime @default(now())
+  partner   Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+}
+
+model PartnerZone {
+  id            String @id @default(cuid())
+  partnerId     String
+  zip           String
+  city          String
+  travelFeeCents Int   @default(0)
+  partner       Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  @@unique([partnerId, zip])
+}
+
+model Service {
+  id          String @id @default(cuid())
+  code        String @unique
+  name        String
+  description String @default("")
+  durationMin Int
+  priceCents  Int    // prix indicatif / plancher pour la catégorie
+  active      Boolean @default(true)
+  sort        Int    @default(0)
+  partnerServices PartnerService[]
+}
+
+model PartnerService {
+  id          String  @id @default(cuid())
+  partnerId   String
+  serviceId   String
+  priceCents  Int
+  durationMin Int
+  active      Boolean @default(true)
+  partner     Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  service     Service @relation(fields: [serviceId], references: [id])
+  @@unique([partnerId, serviceId])
+}
+
+model AvailabilityRule {
+  id        String @id @default(cuid())
+  partnerId String
+  weekday   Int    // 1 = lundi … 7 = dimanche
+  startMin  Int    // minutes depuis minuit (Europe/Zurich)
+  endMin    Int
+  partner   Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+}
+
+model TimeOff {
+  id        String   @id @default(cuid())
+  partnerId String
+  startsAt  DateTime
+  endsAt    DateTime
+  reason    String?
+  partner   Partner  @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+}
+
+model PromoCode {
+  id          String  @id @default(cuid())
+  code        String  @unique
+  percentOff  Int?
+  amountOffCents Int?
+  maxUses     Int?
+  usedCount   Int     @default(0)
+  validUntil  DateTime?
+  active      Boolean @default(true)
+}
+
+model Booking {
+  id            String   @id @default(cuid())
+  number        String   @unique
+  clientId      String
+  partnerId     String
+  mode          String   // ASAP | SCHEDULED
+  status        String   // voir modules/booking-state.ts
+  startsAt      DateTime
+  endsAt        DateTime
+  travelBufferMin Int    @default(0)
+  // Adresse figée à la réservation (le client peut ensuite modifier son carnet)
+  street        String
+  zip           String
+  city          String
+  access        String?
+  lat           Float?
+  lng           Float?
+  subtotalCents Int
+  travelFeeCents Int
+  discountCents Int      @default(0)
+  totalCents    Int
+  commissionBps Int
+  commissionCents Int
+  partnerNetCents Int
+  promoCode     String?
+  paymentMode   String   @default("ONLINE") // ONLINE | ON_SITE (payé directement au barbier, hors plateforme)
+  people        Int      @default(1) // nombre de personnes à coiffer
+  source        String   @default("ONLINE") // ONLINE | MANUAL (saisi à la main : téléphone, sur place — payé hors plateforme)
+  cancelledBy   String?  // CLIENT | PARTNER | ADMIN | SYSTEM
+  cancelledAt   DateTime?
+  cancelReason  String?
+  refundCents   Int      @default(0)
+  responseDeadline DateTime?
+  acceptedAt    DateTime?
+  enRouteAt     DateTime?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  payoutId      String?
+  createdAt     DateTime @default(now())
+  client        User     @relation("ClientBookings", fields: [clientId], references: [id])
+  partner       Partner  @relation(fields: [partnerId], references: [id])
+  items         BookingItem[]
+  payments      Payment[]
+  messages      Message[]
+  review        Review?
+  dispute       Dispute?
+  payout        Payout?  @relation(fields: [payoutId], references: [id])
+  @@index([partnerId, startsAt])
+  @@index([clientId])
+}
+
+model BookingItem {
+  id          String  @id @default(cuid())
+  bookingId   String
+  serviceId   String
+  name        String
+  priceCents  Int
+  durationMin Int      // durée UNITAIRE (par personne)
+  quantity    Int     @default(1) // nombre de fois que la prestation est réalisée (ex. 2 coupes)
+  booking     Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+}
+
+model Payment {
+  id             String   @id @default(cuid())
+  bookingId      String
+  provider       String   // demo | stripe
+  providerRef    String?
+  idempotencyKey String   @unique
+  status         String   // REQUIRES_PAYMENT | AUTHORIZED | CAPTURED | RELEASED | PARTIALLY_REFUNDED | REFUNDED | FAILED
+  amountCents    Int
+  capturedCents  Int      @default(0)
+  refundedCents  Int      @default(0)
+  failureReason  String?
+  createdAt      DateTime @default(now())
+  booking        Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+}
+
+model PaymentEvent {
+  id        String   @id // identifiant d'événement du prestataire → dédoublonnage
+  type      String
+  receivedAt DateTime @default(now())
+}
+
+model Payout {
+  id          String   @id @default(cuid())
+  partnerId   String
+  amountCents Int
+  status      String   @default("PENDING") // PENDING | PAID | FAILED
+  providerRef String?
+  createdAt   DateTime @default(now())
+  paidAt      DateTime?
+  partner     Partner  @relation(fields: [partnerId], references: [id])
+  bookings    Booking[]
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  bookingId String
+  senderId  String
+  body      String
+  flagged   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  sender    User     @relation(fields: [senderId], references: [id])
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  bookingId String   @unique
+  rating    Int
+  comment   String   @default("")
+  status    String   @default("PUBLISHED") // PUBLISHED | HIDDEN | REPORTED
+  createdAt DateTime @default(now())
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+}
+
+model Dispute {
+  id        String   @id @default(cuid())
+  bookingId String   @unique
+  openedBy  String
+  reason    String
+  status    String   @default("OPEN") // OPEN | RESOLVED | REJECTED
+  resolution String?
+  createdAt DateTime @default(now())
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  body      String
+  href      String?
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Outbox { // e-mails sortants (envoyés par SMTP si configuré ; consultables en dev)
+  id        String   @id @default(cuid())
+  toEmail   String
+  subject   String
+  body      String
+  sentAt    DateTime?
+  error     String?
+  createdAt DateTime @default(now())
+}
+
+model ContentPage { // pages publiques & documents juridiques éditables
+  slug      String   @id
+  title     String
+  body      String   // markdown simplifié
+  updatedAt DateTime @updatedAt
+  published Boolean  @default(true)
+}
+
+model Setting {
+  key   String @id
+  value String
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  diff      String?
+  createdAt DateTime @default(now())
+  @@index([createdAt])
+}
+
+model Session { // session révocable (web = cookie, app = jeton d'accès + jeton de renouvellement)
+  id          String   @id @default(cuid())
+  userId      String
+  kind        String   @default("WEB") // WEB | APP
+  refreshHash String?  @unique         // APP : hash du jeton de renouvellement courant
+  prevRefreshHash String?              // APP : ancien jeton (sa réutilisation = vol probable → session coupée)
+  device      String?
+  ip          String?
+  createdAt   DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+}
+
+model SecurityEvent { // journal de sécurité (sans donnée sensible : jamais de mot de passe, jeton ou carte)
+  id        String   @id @default(cuid())
+  type      String
+  severity  String   @default("INFO") // INFO | WARN | HIGH
+  userId    String?
+  ip        String?
+  detail    String?
+  alerted   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  @@index([createdAt])
+  @@index([type, createdAt])
+}
+
+model Device { // appareil mobile enregistré pour les notifications push
+  id         String   @id @default(cuid())
+  userId     String
+  platform   String   // ios | android | web
+  token      String   @unique
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
